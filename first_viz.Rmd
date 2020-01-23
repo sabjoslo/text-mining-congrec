@@ -1,0 +1,144 @@
+---
+title: "Assignment 1: First Visualization"
+author: "Sabina Sloman"
+date: "1/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+# Install needed libraries
+library(feather)
+library(tidyverse)
+library(tm)
+library(wordcloud)
+
+set.seed(1)
+```
+
+# Import the data
+
+These data were originally saved as a Python [`pandas`](https://pandas.pydata.org/) object, so I first converted them to a [`feather`](https://github.com/wesm/feather) format, suggested [here](https://stackoverflow.com/questions/46390461#46434642) as the best way to transfer data between Python and R.
+
+```{r import}
+dem.dat <- read_feather("dem_dat.feather")
+repub.dat <- read_feather("repub_dat.feather")
+```
+
+# Transform the data
+
+Each of the data frames has three columns: `speaker` (the ID of the speaker), `date` (the date on which the speech was said) and `speech` (the text of the speech). What I want is to break the `speech` column up into a bunch of columns, each of which corresponds to the frequency count of a single word.
+
+```{r count.words}
+# Some of this was taken from the StackOverflow exchange 
+# https://stackoverflow.com/questions/18101047
+
+# I set a lower bound for number of times a word has been seen, which keeps the 
+# size of the dataset manageable
+min.obs <- 500
+
+dtm.dem <- dem.dat$speech %>%
+  VectorSource() %>%
+  Corpus() %>%
+  DocumentTermMatrix(control = list(bounds = list(global = c(min.obs, Inf)),
+                                    stopwords = TRUE)) %>%
+  as.matrix() %>%
+  as_tibble()
+
+dem.dat <- bind_cols(dem.dat, dtm.dem)
+
+dtm.repub <- repub.dat$speech %>%
+  VectorSource() %>%
+  Corpus() %>%
+  DocumentTermMatrix(control = list(bounds = list(global = c(min.obs, Inf)),
+                                    stopwords = TRUE)) %>%
+  as.matrix() %>%
+  as_tibble()
+
+repub.dat <- bind_cols(repub.dat, dtm.repub)
+
+dem.dat$party <- "D"
+repub.dat$party <- "R"
+dat <- bind_rows(dem.dat, repub.dat) %>%
+  # https://stackoverflow.com/questions/47060014#47060112
+  mutate_all(~ replace(., is.na(.), 0)) %>%
+  mutate(speaker = factor(speaker), date = as.Date(date))
+```
+
+Now I have a data frame with `r nrow(dat)` total speeches, given by `r length(levels(dat$speaker))` speakers on `r n_distinct(dat$date)` different days. Overall, they said `r ncol(dat)-4` unique words more than 500 times.
+
+# Visualization
+
+To get an initial sense of what the overall distribution of words is, I'll first just create a word cloud.
+
+```{r wordcloud}
+word.dat <- dat %>%
+  select(-c("speaker","date","speech","party"))
+
+word.counts <- apply(word.dat, 2, sum)
+
+wordcloud(colnames(word.dat), word.counts)
+```
+
+It looks like the word "health" was said a lot. Now I'll look at how the use of that word changed over the year.
+
+```{r healthcare}
+ggplot(data = dat %>%
+         group_by(date) %>%
+         summarize(health.sum = sum(health))) +
+  geom_line(mapping = aes(x = date, y = health.sum)) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y", name = "Date") +
+  scale_y_continuous(name = "Number of obs. of \"health\"") +
+  # http://www.sthda.com/english/wiki/ggplot2-axis-ticks-a-guide-to-customize-tick-marks-and-labels
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Use of the word "health" seems to accelerate until it peaks in May... which is when [the House GOP passed a major healthcare reform bill](https://www.cnbc.com/2017/12/27/the-biggest-us-political-stories-of-a-chaotic-2017.html).
+
+What is the distribution of floor time like? Are there members who dominate the discussion, or do they all say about the same number of words?[^1]
+
+[^1]: This is only counting words that were said more than 500 times, so it's actually picking up on who says the most *commonly used* words.
+
+```{r by.member}
+counts.by.member <- dat %>%
+         mutate(total = apply(word.dat, 1, sum)) %>%
+         group_by(speaker) %>%
+         summarize(total = sum(total))
+
+ggplot(counts.by.member) +
+  geom_freqpoly(mapping = aes(x = total)) +
+  scale_x_continuous(name = "N words") +
+  scale_y_continuous(name = "N members")
+```
+
+Another way to visualize this distribution is as a pie chart.
+
+```{r by.member.piechart}
+# http://www.sthda.com/english/wiki/ggplot2-pie-chart-quick-start-guide-r-software-and-data-visualization
+tmp <- counts.by.member %>% mutate(speaker = fct_lump(speaker, prop = .01, w = total))
+
+ggplot(data = tmp, 
+       mapping = aes(x = "", y = total, fill = speaker)) +
+  geom_bar(stat = "identity") +
+  coord_polar("y") +
+  ggtitle("Distribution of total number of words spoken") +
+  scale_fill_discrete(name = "Member") +
+  # https://stackoverflow.com/questions/35090883#35090981
+  theme(axis.text.x = element_blank()) +
+  # https://www.r-bloggers.com/pie-charts-in-ggplot2/
+  xlab("") +
+  ylab("")
+```
+
+Because I live in Pennsylvania, one name sticks out to me: Congressman Thompson from [Pennsylvania's 15th district](https://en.wikipedia.org/wiki/Pennsylvania%27s_15th_congressional_district) (which borders Allegheny county). To see what he talked about the most, I generated a word cloud just on the words he used.
+
+```{r thompson}
+thompson.dat <- dat %>%
+  filter(speaker == "Mr. THOMPSON of Pennsylvania.") %>%
+  select(-c("speaker","date","speech","party"))
+
+word.counts <- apply(thompson.dat, 2, sum)
+
+wordcloud(colnames(thompson.dat), word.counts)
+```
